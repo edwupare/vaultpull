@@ -2,43 +2,34 @@ package envwriter
 
 import (
 	"fmt"
-	"os"
+	"io"
 	"sort"
 	"strings"
 )
 
-// FilteredWrite writes secrets to the given file path as KEY=VALUE lines.
-// If namespace is non-empty, only keys with that prefix (case-insensitive) are written.
-// The prefix is stripped from the key name before writing.
-func FilteredWrite(filePath string, secrets map[string]string, namespace string) (int, error) {
-	var lines []string
-	ns := strings.ToUpper(strings.TrimRight(namespace, "_"))
-
+// FilteredWrite writes secrets as KEY=VALUE lines to w.
+// If namespace is non-empty, only keys with that prefix are written.
+// Returns (written, filtered, error) where filtered is the count of excluded keys.
+func FilteredWrite(w io.Writer, secrets map[string]string, namespace string) (int, int, error) {
 	keys := make([]string, 0, len(secrets))
 	for k := range secrets {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
 
+	written := 0
+	filtered := 0
+
 	for _, k := range keys {
-		key := strings.ToUpper(k)
-		if ns != "" {
-			if !strings.HasPrefix(key, ns+"_") {
-				continue
-			}
-			key = strings.TrimPrefix(key, ns+"_")
+		if namespace != "" && !strings.HasPrefix(k, namespace+"_") && k != namespace {
+			filtered++
+			continue
 		}
-		lines = append(lines, fmt.Sprintf("%s=%s", key, secrets[k]))
+		if _, err := fmt.Fprintf(w, "%s=%s\n", k, secrets[k]); err != nil {
+			return written, filtered, fmt.Errorf("envwriter: write error: %w", err)
+		}
+		written++
 	}
 
-	if len(lines) == 0 {
-		return 0, nil
-	}
-
-	content := strings.Join(lines, "\n") + "\n"
-	if err := os.WriteFile(filePath, []byte(content), 0600); err != nil {
-		return 0, fmt.Errorf("envwriter: failed to write %q: %w", filePath, err)
-	}
-
-	return len(lines), nil
+	return written, filtered, nil
 }
