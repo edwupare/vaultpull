@@ -4,56 +4,57 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/vaultpull/internal/config"
-	"github.com/vaultpull/internal/envwriter"
-	"github.com/vaultpull/internal/vault"
+	"github.com/user/vaultpull/internal/config"
+	"github.com/user/vaultpull/internal/envwriter"
+	"github.com/user/vaultpull/internal/vault"
 )
 
-// Result holds the outcome of a sync operation.
-type Result struct {
-	Path      string
-	Written   int
-	Filtered  int
-	OutputFile string
-}
-
-// Syncer orchestrates reading secrets from Vault and writing them to a file.
+// Syncer orchestrates reading secrets from Vault and writing them to a .env file.
 type Syncer struct {
-	client *vault.Client
 	cfg    *config.Config
+	client *vault.Client
 }
 
-// New creates a new Syncer from the provided config.
+// New creates a new Syncer from the given config.
 func New(cfg *config.Config) (*Syncer, error) {
 	client, err := vault.NewClient(cfg.VaultAddr, cfg.VaultToken)
 	if err != nil {
-		return nil, fmt.Errorf("syncer: failed to create vault client: %w", err)
+		return nil, fmt.Errorf("creating vault client: %w", err)
 	}
-	return &Syncer{client: client, cfg: cfg}, nil
+	return &Syncer{cfg: cfg, client: client}, nil
 }
 
-// Run performs the full sync: read secrets, filter by namespace, write to output.
-func (s *Syncer) Run(secretPath, namespace, outputFile string) (*Result, error) {
-	secrets, err := s.client.ReadSecrets(secretPath)
+// Run performs the full sync: read secrets, diff, backup, merge, and write.
+func (s *Syncer) Run() error {
+	secrets, err := s.client.ReadSecrets(s.cfg.SecretPath)
 	if err != nil {
-		return nil, fmt.Errorf("syncer: failed to read secrets at %q: %w", secretPath, err)
+		return fmt.Errorf("reading secrets: %w", err)
 	}
 
-	f, err := os.Create(outputFile)
-	if err != nil {
-		return nil, fmt.Errorf("syncer: failed to create output file %q: %w", outputFile, err)
-	}
-	defer f.Close()
+	filtered := envwriter.FilterSecrets(secrets, s.cfg.Namespace)
 
-	written, filtered, err := envwriter.FilteredWrite(f, secrets, namespace)
-	if err != nil {
-		return nil, fmt.Errorf("syncer: failed to write env file: %w", err)
+	// Load existing env for diffing
+	existing := map[string]string{}
+	if data, err := envwriter.ReadEnvFile(s.cfg.OutputFile); err == nil {
+		existing = data
 	}
 
-	return &Result{
-		Path:       secretPath,
-		Written:    written,
-		Filtered:   filtered,
-		OutputFile: outputFile,
-	}, nil
+	diff := envwriter.DiffEnv(existing, filtered)
+	if !diff.HasChanges() {
+		fmt.Fprintln(os.Stdout, "No changes detected.")
+		return nil
+	}
+
+	fmt.Fprintf(os.Stdout, "Changes:\n%s", diff.Summary())
+
+	if err := envwriter.BackupFile(s.cfg.OutputFile, s.cfg.BackupCount); err != nil {
+		return fmt.Errorf("backing up env file: %w", err)
+	}
+
+	if err := envwriter.MergeEnvFile(s.cfg.OutputFile, filtered); err != nil {
+		return fmt.Errorf("merging env file: %w", err)
+	}
+
+	fmt.Fprintf(os.Stdout, "Synced %d secret(s) to %s\n", len(filtered), s.cfg.OutputFile)
+	return nil
 }
